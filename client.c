@@ -287,7 +287,6 @@ int main(int argc, char **argv)
     connection c;
     connection *cons_p;
 
-    /* TODO: add option to scpecify UDP or TCP */
     while((opt = getopt(argc, argv, "4:6:p:t:S:d:T:i:h")) != -1)
     {
         switch(opt) {
