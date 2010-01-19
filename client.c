@@ -82,29 +82,31 @@ typedef struct _event_timeout
 } event_timeout;
 
 
-#if defined (__linux__)
 void sleep_random(void)
 {
     struct timeval tv;
+
+#if defined (__linux__)
     struct drand48_data buff;
     long int res;
     unsigned int t;
+#endif
 
+#if defined (__linux__)
     gettimeofday(&tv, NULL);
     srand48_r(tv.tv_usec, &buff);
     lrand48_r(&buff, &res);
     t = ((res >> 8) & (1000000));
     usleep(t);
-}
 #elif defined (__FreeBSD__)
-void sleep_random(void)
-{
-    struct timeval tv;
-  
     gettimeofday(&tv, NULL);
     usleep((arc4random() % (tv.tv_usec + 1)) / 100);
-}
+#else
+    gettimeofday(&tv, NULL);
+    srand((tv.tv_sec + tv.tv_usec) >> (sizeof(long) / 2));
+    usleep((rand() & 1000000) >> 2);
 #endif
+}
 
 
 int get_ip_subopt(char **server, char **client, char *arg)
