@@ -241,9 +241,8 @@ void output_stats(int fd, short event, void *arg)
         }
 
         pthread_mutex_unlock(&stats_p->lock);
-
-        DPRINT(DPRINT_DEBUG, "[%s] total [%ld] current[%ld]\n", 
-           __FUNCTION__, t, c);
+   
+        DPRINT(DPRINT_DEBUG, "[total: %ld current: %ld]\n", t, c);
     }
 
     event_add(&e_wrap->event, e_wrap->tv);

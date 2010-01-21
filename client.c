@@ -189,6 +189,8 @@ void print_usage(char *cmd)
 void *cb_run_client(void *arg)
 {
     int est = 0;
+    int cur = 0;
+    int status[4] = {124, 47, 45, 92};
     char *buffer = NULL;
     connection *cd_p = (connection *)arg;
 
@@ -214,6 +216,8 @@ void *cb_run_client(void *arg)
             while(!is_val_set(cd_p->stop, 1, &cd_p->lock)) {
                 sendto(cd_p->s, buffer, cd_p->buf_len, 0, 
                     (struct sockaddr *)&cd_p->servAddr, cd_p->bindAddrSize);
+                DPRINT(DPRINT_DEBUG, "sending [%c]\r", status[cur]);
+                cur = ((cur + 1) > 4) ? 0 : (cur + 1);
                 usleep(cd_p->delay);
             }
         }
@@ -224,6 +228,8 @@ void *cb_run_client(void *arg)
                 est = 1;
                 while(!is_val_set(cd_p->stop, 1, &cd_p->lock)) {
                     send(cd_p->s, buffer, cd_p->buf_len, 0);
+                    DPRINT(DPRINT_DEBUG, "sending [%c]\r", status[cur]);
+                    cur = ((cur + 1) > 4) ? 0 : (cur + 1);
                     usleep(cd_p->delay);
                 }
             }
