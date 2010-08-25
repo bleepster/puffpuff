@@ -663,6 +663,7 @@ void print_usage(char *cmd)
     DPRINT(DPRINT_ERROR,"\t[-S <size of data>]\n");
     DPRINT(DPRINT_ERROR,"\t[-i <interval (seconds) for displaying stats>]\n");
     DPRINT(DPRINT_ERROR,"\t[-d <run as daemon>]\n");
+    DPRINT(DPRINT_ERROR,"\t[-m <maximum allowable connections>]\n");
     DPRINT(DPRINT_ERROR,"Defaults:\n");
     DPRINT(DPRINT_ERROR,"\tSize of receive data: 256 bytes\n");
     DPRINT(DPRINT_ERROR,"\tDisplay status interval: 1 second\n");
