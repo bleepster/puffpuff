@@ -287,9 +287,6 @@ void *cb_run_client(void *arg)
 
         close(cd_p->s);
         free(buffer);
-
-        DPRINT(DPRINT_DEBUG, "[%s] socket %d closed \n",
-                      __FUNCTION__, cd_p->s);
     } while(0);
 
     if(est) {
@@ -494,7 +491,7 @@ int main(int argc, char **argv)
 
     if(pthread_mutex_init(&cl.lock, NULL) != 0) {
         DPRINT(DPRINT_ERROR, "[%s] failed to initialize lock\n",
-            __FUNCTION__, i);
+            __FUNCTION__);
         return (1);
     }
 
@@ -504,9 +501,6 @@ int main(int argc, char **argv)
     for(i = 0; i < icount; ++i) {
         memcpy(&cons_p[i], &c, sizeof(connection));
 
-        DPRINT(DPRINT_DEBUG, "[%s] setting up connection #%d\n", __FUNCTION__, 
-            cons_p[i].idx);
-
         if(pthread_mutex_init(&cons_p[i].lock, NULL) != 0) {
             DPRINT(DPRINT_ERROR, "[%s] #%d failed to initialize lock\n",
                 __FUNCTION__, i);
@@ -514,6 +508,7 @@ int main(int argc, char **argv)
         }
 
         cons_p[i].idx = i;
+        cons_p[i].client = &cl;
         if(pthread_create(&cons_p[i].tid, NULL, cb_run_client, 
                &cons_p[i]) != 0) {
             DPRINT(DPRINT_ERROR, "[%s] [%d] failed to run\n", __FUNCTION__, i);
@@ -527,11 +522,16 @@ int main(int argc, char **argv)
         usleep(5000);
     }
 
-    DPRINT(DPRINT_DEBUG, "[%s] %d threads running \n", __FUNCTION__,
+    DPRINT(DPRINT_DEBUG, "[%s] %d threads running\n", __FUNCTION__,
         cl.running);
+    DPRINT(DPRINT_DEBUG, "[%s] %d connections established (initial count)\n",
+        __FUNCTION__, cl.estcount);
 
     /* this returns either on a timeout event or a keyboard event */
     event_base_dispatch(ebase_halt);
+
+    DPRINT(DPRINT_DEBUG, "[%s] %d connections established (final count)\n",
+        __FUNCTION__, cl.estcount);
 
     DPRINT(DPRINT_DEBUG, "[%s] cleaning up...\n", __FUNCTION__);
 
@@ -546,15 +546,11 @@ int main(int argc, char **argv)
                 sleep_random();
             }
 
-            DPRINT(DPRINT_DEBUG, "[%s] waiting for #%d\n",
-                __FUNCTION__, cons_p[i].idx);
             while(!is_val_set(cons_p[i].established, 0, &cons_p[i].lock)) {
                 sleep_random();
             }
 
             pthread_mutex_destroy(&cons_p[i].lock);
-            DPRINT(DPRINT_DEBUG, "[%s] connection #%d closed\n",
-                __FUNCTION__, cons_p[i].idx);
         }
     }
 
