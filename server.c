@@ -210,7 +210,8 @@ void recv_data_tcp(int fd, short event, void *arg)
         update_stats(&e_wrap->group->stats, recv_sz);
     }
     else {
-        DPRINT(DPRINT_DEBUG, "[%s] closing socket [%d]\n", __FUNCTION__, fd);
+        DPRINT(DPRINT_DEBUG, "[%s] closing socket [%d], error [%d]\n", 
+            __FUNCTION__, fd, ((recv_sz < 0) ? errno : 0));
         close(fd);
         destroy_event(e_wrap);
     }
@@ -242,7 +243,7 @@ void output_stats(int fd, short event, void *arg)
 
         pthread_mutex_unlock(&stats_p->lock);
    
-        DPRINT(DPRINT_DEBUG, "[total: %ld current: %ld]\n", t, c);
+        /*DPRINT(DPRINT_DEBUG, "[total: %ld current: %ld]\n", t, c);*/
     }
 
     event_add(&e_wrap->event, e_wrap->tv);
@@ -328,7 +329,7 @@ void accept_conn(int fd, short event, void *arg)
                 free(recv_event);
             }
             else {
-                DPRINT(DPRINT_DEBUG, "[%s] connection accepted socket [%d]\n", 
+                DPRINT(DPRINT_DEBUG, "[%s] connection accepted, socket [%d]\n",
                     __FUNCTION__, new_conn);
             }
          }
@@ -514,7 +515,8 @@ int loop_udp(run_data *rd)
         output_event->group = rd->e_group;
         output_event->callback = output_stats;
 
-        output_event->tv = (struct timeval *) calloc(1, sizeof(struct timeval));
+        output_event->tv = (struct timeval *) calloc(1,
+            sizeof(struct timeval));
         output_event->tv->tv_usec = 0;
         output_event->tv->tv_sec = rd->p.interval;
 
