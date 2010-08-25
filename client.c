@@ -73,6 +73,7 @@ typedef struct _connection
   int stop;
   int established;
   int transport;
+  int idx;
   pthread_mutex_t lock;
 } connection;
 
@@ -204,70 +205,10 @@ void print_usage(char *cmd)
 }
 
 
-int loop_tcp(connection *cd_p)
-{
-    int ret = 0;
-    int est = 0;
-
-    if(connect(cd_p->s, (struct sockaddr *)&cd_p->servAddr, 
-        cd_p->bindAddrSize) == 0) {
-           set_val(&cd_p->established, 1, &cd_p->lock);
-           est = 1;
-           while(!is_val_set(cd_p->stop, 1, &cd_p->lock)) {
-                   ret = send(cd_p->s, cd_p->buffer, cd_p->cur_buf_len, 0);
-                   if(ret > 0) {
-                           usleep(cd_p->delay);
-
-                           /* cur_buf_len may have changed, needs update */
-                           inc_bufsize(&cd_p->cur_buf_len, cd_p->buf_len);
-                   }
-                   else if(ret < 0 && errno == ENOBUFS) {
-                           dec_bufsize(&cd_p->cur_buf_len);
-                   }
-                   else {
-                           break;
-                   }
-           }
-    }
-    else {
-            DPRINT(DPRINT_ERROR, "[%s] connect() failed!\n", __FUNCTION__);
-    }
-
-    return (est);
-}
-
-
-int loop_udp(connection *cd_p)
-{
-    int ret = 0;
-    int est = 0;
-
-    set_val(&cd_p->established, 1, &cd_p->lock);
-    est = 1;
-    while(!is_val_set(cd_p->stop, 1, &cd_p->lock)) {
-        ret = sendto(cd_p->s, cd_p->buffer, cd_p->cur_buf_len, 0, 
-                  (struct sockaddr *)&cd_p->servAddr, cd_p->bindAddrSize);
-        if(ret > 0) {
-                usleep(cd_p->delay);
- 
-                /* cur_buf_len may have changed, needs update */
-                inc_bufsize(&cd_p->cur_buf_len, cd_p->buf_len);
-        }
-        else if(ret < 0 && errno == ENOBUFS) {
-                dec_bufsize(&cd_p->cur_buf_len);
-        }
-        else {
-                break;
-        }
-    }
-
-    return (est);
-}
-
-
 void *cb_run_client(void *arg)
 {
     int est = 0;
+    char *buffer = NULL;
     connection *cd_p = (connection *)arg;
 
     do {
@@ -287,18 +228,48 @@ void *cb_run_client(void *arg)
         cd_p->buffer = (char *) malloc(cd_p->cur_buf_len);
 
         if(cd_p->transport == SOCK_DGRAM) {
-            est = loop_udp(cd_p);
+            set_val(&cd_p->established, 1, &cd_p->lock);
+            est = 1;
+            while(!is_val_set(cd_p->stop, 1, &cd_p->lock)) {
+                sendto(cd_p->s, buffer, cd_p->buf_len, 0, 
+                    (struct sockaddr *)&cd_p->servAddr, cd_p->bindAddrSize);
+                usleep(cd_p->delay);
+            }
         }
         else { /* assume it's SOCK_STREAM */
-            est = loop_tcp(cd_p);
+            if(connect(cd_p->s, (struct sockaddr *)&cd_p->servAddr, 
+                   cd_p->bindAddrSize) == 0) {
+
+                while(set_val(&cd_p->established, 1, &cd_p->lock) != 1) {
+                    sleep_random();
+                }
+                est = 1;
+
+                DPRINT(DPRINT_DEBUG, "[%s] connection #%d established!\n",
+                      __FUNCTION__, cd_p->idx);
+
+                while(!is_val_set(cd_p->stop, 1, &cd_p->lock)) {
+                    send(cd_p->s, buffer, cd_p->buf_len, 0);
+                    usleep(cd_p->delay);
+                }
+            }
+            else {
+                DPRINT(DPRINT_ERROR, "[%s] connection #%d connect() failed!\n",
+                      __FUNCTION__, cd_p->idx);
+            }
         }
 
         close(cd_p->s);
-        free(cd_p->buffer);
+        free(buffer);
+
+        DPRINT(DPRINT_DEBUG, "[%s] socket %d closed \n",
+                      __FUNCTION__, cd_p->s);
     } while(0);
 
     if(est) {
-        set_val(&cd_p->established, 0, &cd_p->lock);
+        while(set_val(&cd_p->established, 0, &cd_p->lock) != 1) {
+            sleep_random();
+        }
     }
 
     return (NULL);
@@ -417,11 +388,6 @@ int main(int argc, char **argv)
         return (1);
     } 
 
-    if((buf_len % 8) != 0) {
-        DPRINT(DPRINT_ERROR,"buffer should be a multiple of 8\n");
-        return(1);
-    }
-
     memset(&c, 0, sizeof(connection));
     c.buffer = NULL;
     c.buf_len = buf_len;
@@ -502,10 +468,17 @@ int main(int argc, char **argv)
     for(i = 0; i < icount; ++i) {
         memcpy(&cons_p[i], &c, sizeof(connection));
         pthread_mutex_init(&cons_p[i].lock, NULL);
+        cons_p[i].idx = i;
+        DPRINT(DPRINT_DEBUG, "[%s] setting up connection #%d\n", __FUNCTION__, 
+            cons_p[i].idx);
         if(pthread_create(&cons_p[i].tid, NULL, cb_run_client, 
                &cons_p[i]) != 0) {
             DPRINT(DPRINT_ERROR, "[%s] [%d] failed to run\n", __FUNCTION__, i);
         }
+
+        /* prevent client from choking server */
+        /* add heuristics to determine optimal value ?? */
+        usleep(5000);
     }
 
     DPRINT(DPRINT_DEBUG, "[%s] running...\n", __FUNCTION__);
@@ -519,16 +492,22 @@ int main(int argc, char **argv)
     for(i = 0; i < icount; ++i) {
         if(!is_val_set(cons_p[i].established, 1, &cons_p[i].lock)) {
             pthread_mutex_destroy(&cons_p[i].lock);
-            continue;
         }
         else {
             /* tell thread to stop and do clean up */
-            set_val(&cons_p[i].stop, 1, &cons_p[i].lock);
-            while(!is_val_set(cons_p[i].established, 1, &cons_p[i].lock)) {
+            while(set_val(&cons_p[i].stop, 1, &cons_p[i].lock) != 1) {
                 sleep_random();
             }
-   
+
+            DPRINT(DPRINT_DEBUG, "[%s] waiting for #%d\n",
+                __FUNCTION__, cons_p[i].idx);
+            while(!is_val_set(cons_p[i].established, 0, &cons_p[i].lock)) {
+                sleep_random();
+            }
+
             pthread_mutex_destroy(&cons_p[i].lock);
+            DPRINT(DPRINT_DEBUG, "[%s] connection #%d closed\n",
+                __FUNCTION__, cons_p[i].idx);
         }
     }
 
