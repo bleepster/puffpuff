@@ -85,6 +85,7 @@ typedef struct _run_data
     event_group *e_group;
     params p;
     struct sockaddr_storage saddr_s;
+    size_t saddr_sz;
 } run_data;
 
 
@@ -566,10 +567,10 @@ int run(run_data *rd)
         DPRINT(DPRINT_ERROR, "[%s] socket() failed\n", __FUNCTION__);
         return (1);
     }
-  
-    if(bind(rd->s, (struct sockaddr *)&rd->saddr_s, 
-        sizeof(struct sockaddr)) < 0) {
-            DPRINT(DPRINT_ERROR, "[%s] bind() failed\n", __FUNCTION__);
+
+
+    if(bind(rd->s, (struct sockaddr *)&rd->saddr_s, rd->saddr_sz) < 0) {
+            DPRINT(DPRINT_ERROR, "[%s] bind() failed \n", __FUNCTION__);
             close(rd->s);
             return (1);
     }
@@ -618,6 +619,7 @@ int run4(run_data *rd)
     }
 
     memcpy(&rd->saddr_s, &si, sizeof(struct sockaddr_storage));
+    rd->saddr_sz = sizeof(struct sockaddr_in);
 
     run(rd);
     DPRINT(DPRINT_DEBUG, "[%s] exiting...\n", __FUNCTION__);
@@ -643,6 +645,7 @@ int run6(run_data *rd)
     }
   
     memcpy(&rd->saddr_s, &si, sizeof(struct sockaddr_storage));
+    rd->saddr_sz = sizeof(struct sockaddr_in6);
 
     run(rd);
     DPRINT(DPRINT_DEBUG, "[%s] exiting...\n", __FUNCTION__);
