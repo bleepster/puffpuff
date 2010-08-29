@@ -236,14 +236,19 @@ void register_me(connection *cp)
 }
 
 
+/* Fixme - this is not the intended way to run run_udp_loop */
 void run_udp_loop(void *arg)
 {
     connection *cd_p = (connection *)arg;
 
     set_val(&cd_p->established, 1, &cd_p->lock);
     while(!is_val_set(cd_p->stop, 1, &cd_p->lock)) {
+        cd_p->buffer = (char *) malloc(cd_p->buf_len);
+
         sendto(cd_p->s, cd_p->buffer, cd_p->buf_len, 0, 
             (struct sockaddr *)&cd_p->servAddr, cd_p->bindAddrSize);
+
+        free(cd_p->buffer);
         usleep(cd_p->delay);
     }
 }
@@ -264,9 +269,13 @@ void run_tcp_loop(void *arg)
             while(!is_val_set(cd_p->stop, 1, &cd_p->lock)) {
                 register_me(cd_p);
                 if(is_val_set(cd_p->send_flag, 1, &cd_p->lock)) {
+                    cd_p->buffer = (char *) malloc(cd_p->buf_len);
                     send(cd_p->s, cd_p->buffer, cd_p->buf_len, 0);
+
                     while(set_val(&cd_p->send_flag, 0, &cd_p->lock) != 1)
                         sleep_random();
+
+                    free(cd_p->buffer);
                 }
                 usleep(cd_p->delay);
             }
@@ -338,7 +347,6 @@ void *cb_run_client(void *arg)
             break;
         }
 
-        cd_p->buffer = (char *) malloc(cd_p->buf_len);
 
         if(cd_p->transport == SOCK_DGRAM) {
             run_udp_loop((void *)cd_p);
@@ -348,7 +356,6 @@ void *cb_run_client(void *arg)
         }
 
         close(cd_p->s);
-        free(cd_p->buffer);
         cd_p->buffer = NULL;
 
         DPRINT(DPRINT_DEBUG, "[%s] socket %d closed \n",
