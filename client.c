@@ -52,44 +52,37 @@ enum {
 
 
 char *const token[] = {
-    [SERVER] = "server",
-    [CLIENT] = "client",
-    NULL
+  [SERVER] = "server",
+  [CLIENT] = "client",
+  NULL
 };
 
 
 typedef struct _connection
 {
-    struct sockaddr_storage bindAddr;
-    struct sockaddr_storage servAddr;
-    socklen_t bindAddrSize;
-    char *buffer;
-    int buf_len;
-    int cur_buf_len;
-    int delay;
-    int s;
-    int ipver;
-    pthread_t tid;
-    int stop;
-    int established;
-    int transport;
-    int idx;
-    pthread_mutex_t lock;
-    void *client;
+  struct sockaddr_storage bindAddr;
+  struct sockaddr_storage servAddr;
+  socklen_t bindAddrSize;
+  char *buffer;
+  int buf_len;
+  int cur_buf_len;
+  int delay;
+  int s;
+  int ipver;
+  pthread_t tid;
+  int stop;
+  int con_err;
+  int established;
+  int transport;
+  int idx;
+  pthread_mutex_t lock;
 } connection;
 
-typedef struct _client
-{
-    int estcount;
-    int running;
-    pthread_mutex_t lock;
-    connection *cons;
-} Client;
 
 typedef struct _event_timeout
 {
-    struct event e;
-    struct timeval tv;
+  struct event e;
+  struct timeval tv;
 } event_timeout;
 
 
@@ -177,21 +170,6 @@ int set_val(int *base, int val, pthread_mutex_t *l)
 }
 
 
-int inc_val(int *val, pthread_mutex_t *l)
-{
-    int ret;
-
-    ret = pthread_mutex_trylock(l);
-    if(ret == 0) {
-        *val = (*val) + 1;
-        pthread_mutex_unlock(l);    
-        return (1);
-    }
-    
-    return (0);
-}
-
-
 void dec_bufsize(int *size)
 {
     /* assumption: size is always a multiple of 8 */
@@ -233,7 +211,6 @@ void *cb_run_client(void *arg)
     int est = 0;
     char *buffer = NULL;
     connection *cd_p = (connection *)arg;
-    Client *cl;
 
     do {
         cd_p->s = socket(cd_p->ipver, cd_p->transport, 0);
@@ -249,7 +226,7 @@ void *cb_run_client(void *arg)
             break;
         }
 
-        cd_p->buffer = (char *) malloc(cd_p->cur_buf_len);
+        cd_p->buffer = (char *) malloc(cd_p->buf_len);
 
         if(cd_p->transport == SOCK_DGRAM) {
             set_val(&cd_p->established, 1, &cd_p->lock);
@@ -269,17 +246,19 @@ void *cb_run_client(void *arg)
                 }
                 est = 1;
 
-                cl = (Client *)cd_p->client;
-                while(inc_val(&cl->estcount, &cl->lock) != 1) {
-                    sleep_random();
-                }
+                DPRINT(DPRINT_DEBUG, "[%s] connection #%d established!\n",
+                      __FUNCTION__, cd_p->idx);
 
                 while(!is_val_set(cd_p->stop, 1, &cd_p->lock)) {
-                    send(cd_p->s, buffer, cd_p->buf_len, 0);
+                    send(cd_p->s, cd_p->buffer, cd_p->buf_len, 0);
                     usleep(cd_p->delay);
                 }
             }
             else {
+                while(set_val(&cd_p->con_err, 1, &cd_p->lock) != 1) {
+                    sleep_random();
+                }
+
                 DPRINT(DPRINT_ERROR, "[%s] connection #%d connect() failed!\n",
                       __FUNCTION__, cd_p->idx);
             }
@@ -287,6 +266,9 @@ void *cb_run_client(void *arg)
 
         close(cd_p->s);
         free(buffer);
+
+        DPRINT(DPRINT_DEBUG, "[%s] socket %d closed \n",
+                      __FUNCTION__, cd_p->s);
     } while(0);
 
     if(est) {
@@ -342,7 +324,6 @@ int main(int argc, char **argv)
 
     event_timeout e_timeout;
     connection c;
-    Client cl;
     connection *cons_p;
 
     while((opt = getopt(argc, argv, "4:6:p:t:S:d:T:i:h")) != -1)
@@ -467,6 +448,8 @@ int main(int argc, char **argv)
         c.bindAddrSize = sizeof(struct sockaddr_in6);
     }
 
+    daemon(0,0);
+
     ebase_halt = event_base_new();
     if(ebase_halt == NULL) {
         DPRINT(DPRINT_ERROR, "[%s] unable to initialize event base\n", 
@@ -475,10 +458,12 @@ int main(int argc, char **argv)
     }
 
     /* initialize keyboard interupt event handler */
+    /*
     event_set(&e_ki, STDIN_FILENO, (EV_READ | EV_PERSIST), 
         cb_keyboard_int, ebase_halt);
     event_base_set(ebase_halt, &e_ki);
     event_add(&e_ki, NULL);
+    */
 
     /* initialize timeout event handler */
     e_timeout.tv.tv_usec = 0;
@@ -487,51 +472,33 @@ int main(int argc, char **argv)
     event_base_set(ebase_halt, &e_timeout.e);
     event_add(&e_timeout.e, &e_timeout.tv);
 
-    bzero(&cl, sizeof(Client));
-
-    if(pthread_mutex_init(&cl.lock, NULL) != 0) {
-        DPRINT(DPRINT_ERROR, "[%s] failed to initialize lock\n",
-            __FUNCTION__);
-        return (1);
-    }
-
-    cl.cons = (connection *) calloc(icount, sizeof(connection));
-    cons_p = cl.cons;
+    cons_p = (connection *) calloc(icount, sizeof(connection));
 
     for(i = 0; i < icount; ++i) {
         memcpy(&cons_p[i], &c, sizeof(connection));
-
-        if(pthread_mutex_init(&cons_p[i].lock, NULL) != 0) {
-            DPRINT(DPRINT_ERROR, "[%s] #%d failed to initialize lock\n",
-                __FUNCTION__, i);
-            continue;
-        }
-
+        pthread_mutex_init(&cons_p[i].lock, NULL);
         cons_p[i].idx = i;
-        cons_p[i].client = &cl;
+        DPRINT(DPRINT_DEBUG, "[%s] setting up connection #%d\n", __FUNCTION__, 
+            cons_p[i].idx);
         if(pthread_create(&cons_p[i].tid, NULL, cb_run_client, 
                &cons_p[i]) != 0) {
             DPRINT(DPRINT_ERROR, "[%s] [%d] failed to run\n", __FUNCTION__, i);
         }
-        else {
-            ++cl.running;
+
+        while(!is_val_set(cons_p[i].established, 1, &cons_p[i].lock) &&
+            is_val_set(cons_p[i].con_err, 0, &cons_p[i].lock)) {
+                sleep_random();
         }
 
         /* prevent client from choking server */
         /* add heuristics to determine optimal value ?? */
-        usleep(5000);
+        /*usleep(20000);*/
     }
 
-    DPRINT(DPRINT_DEBUG, "[%s] %d threads running\n", __FUNCTION__,
-        cl.running);
-    DPRINT(DPRINT_DEBUG, "[%s] %d connections established (initial count)\n",
-        __FUNCTION__, cl.estcount);
+    DPRINT(DPRINT_DEBUG, "[%s] running...\n", __FUNCTION__);
 
     /* this returns either on a timeout event or a keyboard event */
     event_base_dispatch(ebase_halt);
-
-    DPRINT(DPRINT_DEBUG, "[%s] %d connections established (final count)\n",
-        __FUNCTION__, cl.estcount);
 
     DPRINT(DPRINT_DEBUG, "[%s] cleaning up...\n", __FUNCTION__);
 
@@ -546,11 +513,15 @@ int main(int argc, char **argv)
                 sleep_random();
             }
 
+            DPRINT(DPRINT_DEBUG, "[%s] waiting for #%d\n",
+                __FUNCTION__, cons_p[i].idx);
             while(!is_val_set(cons_p[i].established, 0, &cons_p[i].lock)) {
                 sleep_random();
             }
 
             pthread_mutex_destroy(&cons_p[i].lock);
+            DPRINT(DPRINT_DEBUG, "[%s] connection #%d closed\n",
+                __FUNCTION__, cons_p[i].idx);
         }
     }
 
