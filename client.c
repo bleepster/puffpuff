@@ -440,11 +440,12 @@ int main(int argc, char **argv)
     int icount = DEF_INSTANCES;
     int len;
     int transport = 0;
+    int background = 0;
 
     struct sockaddr_in sin;
     struct sockaddr_in6 sin6;
     struct event_base *ebase_halt = NULL;
-    /*struct event e_ki;*/
+    struct event e_ki;
 
     event_timeout e_timeout;
     connection c;
@@ -453,7 +454,7 @@ int main(int argc, char **argv)
 
     traffic_gw tg;
 
-    while((opt = getopt(argc, argv, "4:6:p:t:S:d:T:i:h")) != -1)
+    while((opt = getopt(argc, argv, "4:6:p:t:S:d:T:i:hb")) != -1)
     {
         switch(opt) {
             case '4':
@@ -499,6 +500,10 @@ int main(int argc, char **argv)
 
             case 'i':
                 icount = (int) strtol(optarg, (char **)NULL, 10);
+                break;
+
+            case 'b':
+                background = 1;
                 break;
 
             case 'h':
@@ -575,7 +580,8 @@ int main(int argc, char **argv)
         c.bindAddrSize = sizeof(struct sockaddr_in6);
     }
 
-    daemon(0,0);
+    if (background)
+        daemon(0,0);
 
     ebase_halt = event_base_new();
     if(ebase_halt == NULL) {
@@ -584,13 +590,13 @@ int main(int argc, char **argv)
         return (1);
     }
 
+    if(!background) {
     /* initialize keyboard interupt event handler */
-    /*
-    event_set(&e_ki, STDIN_FILENO, (EV_READ | EV_PERSIST), 
-        cb_keyboard_int, ebase_halt);
-    event_base_set(ebase_halt, &e_ki);
-    event_add(&e_ki, NULL);
-    */
+        event_set(&e_ki, STDIN_FILENO, (EV_READ | EV_PERSIST), 
+            cb_keyboard_int, ebase_halt);
+        event_base_set(ebase_halt, &e_ki);
+        event_add(&e_ki, NULL);
+    }
 
     /* initialize timeout event handler */
     e_timeout.tv.tv_usec = 0;
