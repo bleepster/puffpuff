@@ -29,9 +29,11 @@ Optional parameters
         [-i <number of thread instances>]
         [-d <delay time>]
         [-T <duration (in seconds)>]
+        [-b <run in background>]
 Defaults
         Delay: 1000000 usec
         Number of instances: 1
+        Process will run in the foreground
 
 Usage (server)
 ===============
@@ -43,6 +45,8 @@ Optional parameters
         [-S <size of data>]
         [-i <interval (seconds) for displaying stats>]
         [-d <run as daemon>]
+        [-m <maximum allowable connections>]
 Defaults
         Size of receive data: 256 bytes
         Display status interval: 1 second
+        Maximum allowable sessions: 100

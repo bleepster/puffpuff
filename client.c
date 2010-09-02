@@ -237,9 +237,11 @@ void print_usage(char *cmd)
     DPRINT(DPRINT_ERROR,"\t[-i <number of thread instances>]\n");
     DPRINT(DPRINT_ERROR,"\t[-d <delay time>]\n");
     DPRINT(DPRINT_ERROR,"\t[-T <duration (in seconds)>]\n");
+    DPRINT(DPRINT_ERROR,"\t[-b <run in background>]\n");
     DPRINT(DPRINT_ERROR,"Defaults:\n");
     DPRINT(DPRINT_ERROR,"\tDelay: 1000000 usec\n");
     DPRINT(DPRINT_ERROR,"\tNumber of instances: 1\n");
+    DPRINT(DPRINT_ERROR,"\tProcess will run in the foreground\n");
 }
 
 
