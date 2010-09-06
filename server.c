@@ -28,6 +28,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <sys/queue.h>
 
 #include <pthread.h>
 
@@ -38,23 +39,37 @@
 
 struct _event_group;
 
+struct echo_node {
+    size_t echo_send_sz;
+    TAILQ_ENTRY(echo_node) entries;
+};
+
+typedef struct _echo_queue {
+    int active;
+    u_int32_t count;
+    pthread_mutex_t lock;
+    TAILQ_HEAD(echo_queue_h, echo_node) head;
+} echo_queue;
+
+
 typedef struct _event_data_wrap {
-  int fd;
-  int buf_sz;
-  short eflags;
-  void *params;
-  struct timeval *tv;
-  struct event event;
-  struct _event_group *group;
-  void (*callback)(int, short, void *arg);
-  struct sockaddr_storage peer_s;
+    int fd;
+    int buf_sz;
+    short eflags;
+    void *params;
+    struct timeval *tv;
+    struct event event;
+    struct _event_group *group;
+    void (*callback)(int, short, void *arg);
+    struct sockaddr_storage peer_s;
+    echo_queue *eq;
 } event_data_wrap; 
 
 
 typedef struct _stats {
-  unsigned long total;
-  unsigned long current;
-  pthread_mutex_t lock;
+    unsigned long total;
+    unsigned long current;
+    pthread_mutex_t lock;
 } stats;
 
 
@@ -76,6 +91,7 @@ typedef struct _params
   int buf_sz;
   int max_cons;
   unsigned int interval;
+  int do_echo;
 } params;
 
 
@@ -87,6 +103,86 @@ typedef struct _run_data
     struct sockaddr_storage saddr_s;
     size_t saddr_sz;
 } run_data;
+
+
+/* this function is redundant with client.c, needs merging */
+int srv_is_val_set(int base, int val, pthread_mutex_t *l)
+{
+    int ret;
+
+    ret = pthread_mutex_trylock(l);
+    if(ret == 0) {
+        ret = (base == val) ? 1 : 0;
+        pthread_mutex_unlock(l);    
+        return (ret);
+    }
+
+    return (0);
+}
+
+
+/* this function is redundant with client.c, needs merging */
+int srv_set_val(int *base, int val, pthread_mutex_t *l)
+{
+    int ret;
+
+    /* let's not waste locking, if the value is already set then return */
+    if(*base == val)
+        return (1);
+
+    ret = pthread_mutex_trylock(l);
+    if(ret == 0) {
+        *base = val;
+        pthread_mutex_unlock(l);    
+        return (1);
+    }
+    
+    return (0);
+}
+
+
+/* this function is redundant with client.c, needs merging */
+int srv_inc_val(int *val, pthread_mutex_t *l)
+{
+    int ret;
+
+    ret = pthread_mutex_trylock(l);
+    if(ret == 0) {
+        *val = (*val) + 1;
+        pthread_mutex_unlock(l);    
+        return (1);
+    }
+    
+    return (0);
+}
+
+
+/* this function is redundant with client.c, needs merging */
+void srv_sleep_random(void)
+{
+    struct timeval tv;
+
+#if defined (__linux__)
+    struct drand48_data buff;
+    long int res;
+    unsigned int t;
+#endif
+
+#if defined (__linux__)
+    gettimeofday(&tv, NULL);
+    srand48_r(tv.tv_usec, &buff);
+    lrand48_r(&buff, &res);
+    t = ((res >> 8) & (1000000));
+    usleep(t);
+#elif defined (__FreeBSD__)
+    gettimeofday(&tv, NULL);
+    usleep((arc4random() % (tv.tv_usec + 1)) / 100);
+#else
+    gettimeofday(&tv, NULL);
+    srand((tv.tv_sec + tv.tv_usec) >> (sizeof(long) / 2));
+    usleep((rand() & 1000000) >> 2);
+#endif
+}
 
 
 int update_stats(stats *stats_p, unsigned long val)
@@ -132,6 +228,24 @@ int add_to_group(event_data_wrap *e_wrap)
 
 int destroy_event(event_data_wrap *e_wrap)
 {
+    struct echo_node *en_p = NULL;
+
+    if(e_wrap->eq != NULL) {
+        while(pthread_mutex_trylock(&e_wrap->eq->lock) != 0) 
+            srv_sleep_random();
+
+         e_wrap->eq->active = 0;
+         while(!TAILQ_EMPTY(&e_wrap->eq->head)) {
+             en_p = TAILQ_FIRST(&e_wrap->eq->head);
+             TAILQ_REMOVE(&e_wrap->eq->head, en_p, entries);
+             free(en_p);
+         }
+
+         pthread_mutex_unlock(&e_wrap->eq->lock);
+         pthread_mutex_destroy(&e_wrap->eq->lock);
+         free(e_wrap->eq);
+    }
+
     event_del(&e_wrap->event);
     --e_wrap->group->cur;
 
@@ -192,15 +306,17 @@ int destroy_event_group(event_group **grp)
     event_base_free((*grp)->b);
     free(*grp);
 
+
     return (0);
 }
 
 
-void recv_data_tcp(int fd, short event, void *arg)
+void r_data_tcp(int fd, void *arg)
 {
     int recv_sz = 0;
     char *recv_buff = NULL;
     event_data_wrap *e_wrap = (event_data_wrap *)arg;
+    struct echo_node *en_p = NULL;
     
     recv_buff = (char *) malloc(e_wrap->buf_sz);
     /* if malloc fails, WE.ARE.SCREWED */
@@ -209,6 +325,18 @@ void recv_data_tcp(int fd, short event, void *arg)
     recv_sz = recv(fd, (void *)recv_buff, e_wrap->buf_sz, 0); 
     if(recv_sz > 0) {
         update_stats(&e_wrap->group->stats, recv_sz);
+  
+        en_p = (struct echo_node *) malloc(sizeof(struct echo_node));
+        if(en_p != NULL &&
+            srv_is_val_set(e_wrap->eq->active, 1, &e_wrap->eq->lock)) {
+            while(pthread_mutex_trylock(&e_wrap->eq->lock) != 0) 
+                srv_sleep_random();
+
+            en_p->echo_send_sz = recv_sz;
+            TAILQ_INSERT_TAIL(&e_wrap->eq->head, en_p, entries);
+
+            pthread_mutex_unlock(&e_wrap->eq->lock);
+        }
     }
     else {
         DPRINT(DPRINT_DEBUG, "[%s] closing socket [%d], error [%d]\n", 
@@ -218,6 +346,47 @@ void recv_data_tcp(int fd, short event, void *arg)
     }
  
     free(recv_buff);
+}
+
+
+void w_data_tcp(int fd, void *arg)
+{
+    size_t send_sz = 0;
+    char *send_buff = NULL;
+    event_data_wrap *e_wrap = (event_data_wrap *)arg;
+    struct echo_node *en_p = NULL;
+    
+    if(srv_is_val_set(e_wrap->eq->active, 1, &e_wrap->eq->lock)) {
+        while(pthread_mutex_trylock(&e_wrap->eq->lock) != 0) 
+            srv_sleep_random();
+
+        if(!TAILQ_EMPTY(&e_wrap->eq->head)) {
+            en_p = TAILQ_FIRST(&e_wrap->eq->head);
+            send_sz = en_p->echo_send_sz;
+            TAILQ_REMOVE(&e_wrap->eq->head, en_p, entries);
+            free(en_p);
+        } 
+
+        pthread_mutex_unlock(&e_wrap->eq->lock);
+
+        send_buff = (char *) malloc(send_sz);
+        /* if malloc fails, WE.ARE.SCREWED */
+
+        if(send_buff != NULL) {
+           send(fd, send_buff, send_sz, 0);
+           free(send_buff);
+        }
+    }
+}
+
+
+void rw_data_tcp(int fd, short event, void *arg)
+{
+    if(event == EV_READ)
+        r_data_tcp(fd, arg);
+    
+    if(event == EV_WRITE)
+        w_data_tcp(fd, arg);
 }
 
 
@@ -299,7 +468,7 @@ void accept_conn(int fd, short event, void *arg)
 {
     int new_conn;
     socklen_t sz;
-    event_data_wrap *recv_event = NULL;
+    event_data_wrap *rw_event = NULL;
     run_data *rd = (run_data *)arg;
     struct sockaddr_storage peer;
     
@@ -307,33 +476,54 @@ void accept_conn(int fd, short event, void *arg)
     memset(&peer, 0, sizeof(struct sockaddr_storage));
     new_conn = accept(fd, (struct sockaddr *)&peer, &sz);
     if(new_conn > 0) {
-        recv_event = (event_data_wrap *) calloc(1, sizeof(event_data_wrap));
-        if(recv_event == NULL) {
+        rw_event = (event_data_wrap *) calloc(1, sizeof(event_data_wrap));
+
+        if(rw_event == NULL) {
             DPRINT(DPRINT_ERROR, "[%s] malloc() failed\n", __FUNCTION__);
         }
         else {
-            recv_event->fd = new_conn;
-            recv_event->eflags = (EV_READ | EV_PERSIST);
-            recv_event->group = rd->e_group;
-            recv_event->callback = recv_data_tcp;
-            recv_event->tv = NULL;
-            recv_event->params = recv_event;
-            recv_event->buf_sz = rd->p.buf_sz;
-            memcpy(&recv_event->peer_s, &peer, 
+
+            rw_event->fd = new_conn;
+            rw_event->group = rd->e_group;
+            rw_event->callback = rw_data_tcp;
+            rw_event->tv = NULL;
+            rw_event->params = rw_event;
+            rw_event->buf_sz = rd->p.buf_sz;
+            memcpy(&rw_event->peer_s, &peer, 
                 sizeof(struct sockaddr_storage));
 
-            if(setup_event(recv_event) < 0 || add_to_group(recv_event) < 0) {
+            if(rd->p.do_echo) {
+                rw_event->eq = (echo_queue *) malloc(sizeof(echo_queue));
+
+                rw_event->eflags = (EV_WRITE | EV_READ | EV_PERSIST);
+                if(pthread_mutex_init(&rw_event->eq->lock, NULL) != 0) {
+                    DPRINT(DPRINT_ERROR, "[%s] unable to setup lock\n", 
+                    __FUNCTION__);
+                    close(new_conn);
+                    free(rw_event);
+                }
+                TAILQ_INIT(&rw_event->eq->head);
+            }
+            else {
+                rw_event->eflags = (EV_READ | EV_PERSIST);
+            }
+
+            if(setup_event(rw_event) < 0 || add_to_group(rw_event) < 0) {
                     DPRINT(DPRINT_ERROR, "[%s] unable to setup event\n", 
                     __FUNCTION__);
 
                 close(new_conn);
-                free(recv_event);
+                free(rw_event);
             }
             else {
                 DPRINT(DPRINT_DEBUG, "[%s] connection accepted, socket [%d]\n",
                     __FUNCTION__, new_conn);
+
+                while(srv_set_val(&rw_event->eq->active, 1,
+                    &rw_event->eq->lock) != 1)
+                        srv_sleep_random();
             }
-         }
+       }
     }
 }
 
@@ -365,6 +555,12 @@ int loop_tcp(run_data *rd)
     accept_event->callback = accept_conn;
     accept_event->tv = NULL;
     accept_event->params = rd;
+
+    if(setup_event(accept_event) < 0 || add_to_group(accept_event) < 0) {
+        DPRINT(DPRINT_ERROR, "[%s] unable to setup event\n", __FUNCTION__);
+        free(accept_event);
+        return (1);
+    }
 
     if(setup_event(accept_event) < 0 || add_to_group(accept_event) < 0) {
         DPRINT(DPRINT_ERROR, "[%s] unable to setup event\n", __FUNCTION__);
@@ -570,9 +766,9 @@ int run(run_data *rd)
 
 
     if(bind(rd->s, (struct sockaddr *)&rd->saddr_s, rd->saddr_sz) < 0) {
-            DPRINT(DPRINT_ERROR, "[%s] bind() failed \n", __FUNCTION__);
-            close(rd->s);
-            return (1);
+        DPRINT(DPRINT_ERROR, "[%s] bind() failed \n", __FUNCTION__);
+        close(rd->s);
+        return (1);
     }
 
     if(setup_event_group(&rd->e_group, rd->p.max_cons) < 0) {
@@ -666,6 +862,7 @@ void print_usage(char *cmd)
     DPRINT(DPRINT_ERROR,"\t[-S <size of data>]\n");
     DPRINT(DPRINT_ERROR,"\t[-i <interval (seconds) for displaying stats>]\n");
     DPRINT(DPRINT_ERROR,"\t[-d <run as daemon>]\n");
+    DPRINT(DPRINT_ERROR,"\t[-e <echo received data to sender>]\n");
     DPRINT(DPRINT_ERROR,"\t[-m <maximum allowable connections>]\n");
     DPRINT(DPRINT_ERROR,"Defaults:\n");
     DPRINT(DPRINT_ERROR,"\tSize of receive data: 256 bytes\n");
@@ -679,10 +876,10 @@ int main(int argc, char *argv[])
     int len = 0;
     int opt;
 
-    params p = {NULL, 0, 0, 0, BUFFER_SIZE, MAX_CONNECTIONS, INTERVAL};
+    params p = {NULL, 0, 0, 0, BUFFER_SIZE, MAX_CONNECTIONS, INTERVAL, 0};
     run_data rd;
 
-    while((opt = getopt(argc, argv, "4:6:p:t:S:i:m:d")) != -1) {
+    while((opt = getopt(argc, argv, "4:6:p:t:S:i:m:de")) != -1) {
         switch(opt) {
           case '4':
               p.ip = argv[optind - 1];
@@ -722,6 +919,10 @@ int main(int argc, char *argv[])
 
           case 'd':
               p.is_daemon = 1;
+              break;
+
+          case 'e':
+              p.do_echo = 1;
               break;
 
           case 'h':

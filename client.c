@@ -106,7 +106,8 @@ typedef struct _event_timeout
 } event_timeout;
 
 
-void sleep_random(void)
+/* this function is redundant with server.c, needs merging */
+void cl_sleep_random(void)
 {
     struct timeval tv;
 
@@ -133,6 +134,7 @@ void sleep_random(void)
 }
 
 
+/* this function is redundant with server.c, needs merging */
 int get_ip_subopt(char **server, char **client, char *arg)
 {
     int unknown = 0;
@@ -158,7 +160,8 @@ int get_ip_subopt(char **server, char **client, char *arg)
 }
 
 
-int is_val_set(int base, int val, pthread_mutex_t *l)
+/* this function is redundant with server.c, needs merging */
+int cl_is_val_set(int base, int val, pthread_mutex_t *l)
 {
     int ret;
 
@@ -173,7 +176,8 @@ int is_val_set(int base, int val, pthread_mutex_t *l)
 }
 
 
-int set_val(int *base, int val, pthread_mutex_t *l)
+/* this function is redundant with server.c, needs merging */
+int cl_set_val(int *base, int val, pthread_mutex_t *l)
 {
     int ret;
 
@@ -192,7 +196,8 @@ int set_val(int *base, int val, pthread_mutex_t *l)
 }
 
 
-int inc_val(int *val, pthread_mutex_t *l)
+/* this function is redundant with server.c, needs merging */
+int cl_inc_val(int *val, pthread_mutex_t *l)
 {
     int ret;
 
@@ -250,7 +255,7 @@ void register_me(connection *cp)
     int ret;
     traffic_gw *tg_p = cp->tg_p;
 
-    if(is_val_set(tg_p->is_open, 1, &tg_p->lock)) {
+    if(cl_is_val_set(tg_p->is_open, 1, &tg_p->lock)) {
         ret = pthread_mutex_trylock(&tg_p->lock);
         if(ret == 0) {
             if(tg_p->ticket == NULL)
@@ -269,13 +274,13 @@ void run_udp_loop(void *arg)
     connection *cd_p = (connection *)arg;
     Client *cl = NULL;
 
-    set_val(&cd_p->established, 1, &cd_p->lock);
+    cl_set_val(&cd_p->established, 1, &cd_p->lock);
 
     cl = (Client *)cd_p->client;
-    while(inc_val(&cl->estcount, &cl->lock) != 1)
-        sleep_random();
+    while(cl_inc_val(&cl->estcount, &cl->lock) != 1)
+        cl_sleep_random();
 
-    while(!is_val_set(cd_p->stop, 1, &cd_p->lock)) {
+    while(!cl_is_val_set(cd_p->stop, 1, &cd_p->lock)) {
         cd_p->buffer = (char *) malloc(cd_p->buf_len);
 
         sendto(cd_p->s, cd_p->buffer, cd_p->buf_len, 0, 
@@ -294,24 +299,24 @@ void run_tcp_loop(void *arg)
 
     if(connect(cd_p->s, (struct sockaddr *)&cd_p->servAddr, 
         cd_p->bindAddrSize) == 0) {
-            while(set_val(&cd_p->established, 1, &cd_p->lock) != 1)
-                sleep_random();
+            while(cl_set_val(&cd_p->established, 1, &cd_p->lock) != 1)
+                cl_sleep_random();
 
             cl = (Client *)cd_p->client;
-            while(inc_val(&cl->estcount, &cl->lock) != 1)
-                sleep_random();
+            while(cl_inc_val(&cl->estcount, &cl->lock) != 1)
+                cl_sleep_random();
 
             DPRINT(DPRINT_DEBUG, "[%s] connection #%d established!\n",
                   __FUNCTION__, cd_p->idx);
 
-            while(!is_val_set(cd_p->stop, 1, &cd_p->lock)) {
+            while(!cl_is_val_set(cd_p->stop, 1, &cd_p->lock)) {
                 register_me(cd_p);
-                if(is_val_set(cd_p->send_flag, 1, &cd_p->lock)) {
+                if(cl_is_val_set(cd_p->send_flag, 1, &cd_p->lock)) {
                     cd_p->buffer = (char *) malloc(cd_p->buf_len);
                     send(cd_p->s, cd_p->buffer, cd_p->buf_len, 0);
 
-                    while(set_val(&cd_p->send_flag, 0, &cd_p->lock) != 1)
-                        sleep_random();
+                    while(cl_set_val(&cd_p->send_flag, 0, &cd_p->lock) != 1)
+                        cl_sleep_random();
 
                     free(cd_p->buffer);
                 }
@@ -319,8 +324,8 @@ void run_tcp_loop(void *arg)
             }
     }
     else {
-            while(set_val(&cd_p->con_err, 1, &cd_p->lock) != 1)
-                sleep_random();
+            while(cl_set_val(&cd_p->con_err, 1, &cd_p->lock) != 1)
+                cl_sleep_random();
 
             DPRINT(DPRINT_ERROR, "[%s] connection #%d connect() failed!\n",
                   __FUNCTION__, cd_p->idx);
@@ -334,10 +339,10 @@ void *run_traffic_gateway(void *arg)
     traffic_gw *tg_p = (traffic_gw *)arg;
     connection *cp = NULL;
 
-    while(set_val(&tg_p->is_open, 1, &tg_p->lock) != 1)
-        sleep_random();
+    while(cl_set_val(&tg_p->is_open, 1, &tg_p->lock) != 1)
+        cl_sleep_random();
 
-    while(!is_val_set(tg_p->stop, 1, &tg_p->lock)) {
+    while(!cl_is_val_set(tg_p->stop, 1, &tg_p->lock)) {
         ret = pthread_mutex_trylock(&tg_p->lock);
         if(ret == 0) {
             if(tg_p->ticket != NULL) {
@@ -345,23 +350,23 @@ void *run_traffic_gateway(void *arg)
                     __FUNCTION__, tg_p->ticket);
                 cp = (connection *)tg_p->ticket;
 
-                while(set_val(&cp->send_flag, 1, &cp->lock) != 1)
-                    sleep_random();
+                while(cl_set_val(&cp->send_flag, 1, &cp->lock) != 1)
+                    cl_sleep_random();
                 DPRINT(DPRINT_DEBUG, "[%s] send flag set\n", __FUNCTION__);
 
-                while(!is_val_set(cp->send_flag, 0, &cp->lock))
-                    sleep_random(); 
+                while(!cl_is_val_set(cp->send_flag, 0, &cp->lock))
+                    cl_sleep_random(); 
                 DPRINT(DPRINT_DEBUG, "[%s] send flag unset\n", __FUNCTION__);
 
                 tg_p->ticket = NULL;
             }
             pthread_mutex_unlock(&tg_p->lock);    
         }
-        sleep_random();
+        cl_sleep_random();
     }
 
-    while(set_val(&tg_p->is_open, 0, &tg_p->lock) != 1)
-        sleep_random();
+    while(cl_set_val(&tg_p->is_open, 0, &tg_p->lock) != 1)
+        cl_sleep_random();
 
     return (NULL);
 }
@@ -400,8 +405,8 @@ void *cb_run_client(void *arg)
                       __FUNCTION__, cd_p->s);
     } while(0);
 
-    while(set_val(&cd_p->established, 0, &cd_p->lock) != 1)
-        sleep_random();
+    while(cl_set_val(&cd_p->established, 0, &cd_p->lock) != 1)
+        cl_sleep_random();
 
     return (NULL);
 }
@@ -647,9 +652,9 @@ int main(int argc, char **argv)
              ++cl.running;
         }
 
-        while(!is_val_set(cons_p[i].established, 1, &cons_p[i].lock) &&
-            is_val_set(cons_p[i].con_err, 0, &cons_p[i].lock)) {
-                sleep_random();
+        while(!cl_is_val_set(cons_p[i].established, 1, &cons_p[i].lock) &&
+            cl_is_val_set(cons_p[i].con_err, 0, &cons_p[i].lock)) {
+                cl_sleep_random();
         }
     }
 
@@ -668,26 +673,26 @@ int main(int argc, char **argv)
 
     DPRINT(DPRINT_DEBUG, "[%s] cleaning up...\n", __FUNCTION__);
 
-    if(!is_val_set(tg.is_open, 1, &tg.lock)) {
-        while(set_val(&tg.stop, 1, &tg.lock) != 1)
-            sleep_random();
+    if(!cl_is_val_set(tg.is_open, 1, &tg.lock)) {
+        while(cl_set_val(&tg.stop, 1, &tg.lock) != 1)
+            cl_sleep_random();
     }
 
     /* clean up */
     for(i = 0; i < icount; ++i) {
-        if(!is_val_set(cons_p[i].established, 1, &cons_p[i].lock)) {
+        if(!cl_is_val_set(cons_p[i].established, 1, &cons_p[i].lock)) {
             pthread_mutex_destroy(&cons_p[i].lock);
         }
         else {
             /* tell thread to stop and do clean up */
-            while(set_val(&cons_p[i].stop, 1, &cons_p[i].lock) != 1) {
-                sleep_random();
+            while(cl_set_val(&cons_p[i].stop, 1, &cons_p[i].lock) != 1) {
+                cl_sleep_random();
             }
 
             DPRINT(DPRINT_DEBUG, "[%s] waiting for #%d\n",
                 __FUNCTION__, cons_p[i].idx);
-            while(!is_val_set(cons_p[i].established, 0, &cons_p[i].lock)) {
-                sleep_random();
+            while(!cl_is_val_set(cons_p[i].established, 0, &cons_p[i].lock)) {
+                cl_sleep_random();
             }
 
             pthread_mutex_destroy(&cons_p[i].lock);
