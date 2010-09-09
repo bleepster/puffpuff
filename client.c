@@ -57,6 +57,7 @@ char *const token[] = {
     NULL
 };
 
+#if 0
 typedef struct _traffic_gw
 {
     int is_open;
@@ -65,6 +66,8 @@ typedef struct _traffic_gw
     pthread_t tid;
     pthread_mutex_t lock;
 } traffic_gw; 
+#endif
+
 
 typedef struct _connection
 {
@@ -73,28 +76,36 @@ typedef struct _connection
     socklen_t bindAddrSize;
     char *buffer;
     int buf_len;
-    int cur_buf_len;
-    int delay;
+    /*int cur_buf_len;*/
+    /*int delay;*/
     int s;
     int ipver;
-    pthread_t tid;
-    int stop;
-    int con_err;
+    /*pthread_t tid;*/
+    /*int stop;*/
+    /*int con_err;*/
     int established;
     int transport;
-    int idx;
-    int send_flag;
-    pthread_mutex_t lock;
-    void *client;
-    traffic_gw *tg_p;
+    /*int idx;*/
+    /*int send_flag;*/
+    /*pthread_mutex_t lock;*/
+    struct timeval current;
+    struct timeval prev;
+    time_t delay;
+    /*void *client;*/
+    /*traffic_gw *tg_p;*/
+    struct event r_event;
+    struct event w_event;
+    struct event_base *e_base;
 } connection;
 
 
 typedef struct _client
 {
-    int estcount;
+#if 0
     int running;
     pthread_mutex_t lock;
+#endif
+    int estcount;
     connection *cons;
 } Client;
 
@@ -106,6 +117,7 @@ typedef struct _event_timeout
 } event_timeout;
 
 
+#if 0
 /* this function is redundant with server.c, needs merging */
 void cl_sleep_random(void)
 {
@@ -132,6 +144,7 @@ void cl_sleep_random(void)
     usleep((rand() & 1000000) >> 2);
 #endif
 }
+#endif
 
 
 /* this function is redundant with server.c, needs merging */
@@ -160,6 +173,7 @@ int get_ip_subopt(char **server, char **client, char *arg)
 }
 
 
+#if 0
 /* this function is redundant with server.c, needs merging */
 int cl_is_val_set(int base, int val, pthread_mutex_t *l)
 {
@@ -210,8 +224,10 @@ int cl_inc_val(int *val, pthread_mutex_t *l)
     
     return (0);
 }
+#endif
 
 
+#if 0
 void dec_bufsize(int *size)
 {
     /* assumption: size is always a multiple of 8 */
@@ -226,6 +242,7 @@ void inc_bufsize(int *size, int limit)
     int inc_size = (*size) + 8;
     *size = (inc_size <= limit) ? inc_size : *size;
 }
+#endif
 
 
 void print_usage(char *cmd)
@@ -250,6 +267,7 @@ void print_usage(char *cmd)
 }
 
 
+#if 0
 void register_me(connection *cp)
 {
     int ret;
@@ -331,8 +349,10 @@ void run_tcp_loop(void *arg)
                   __FUNCTION__, cd_p->idx);
     }
 }
+#endif
 
 
+#if 0
 void *run_traffic_gateway(void *arg)
 {
     int ret;
@@ -370,8 +390,146 @@ void *run_traffic_gateway(void *arg)
 
     return (NULL);
 }
+#endif
 
 
+void recv_udp(connection *c)
+{
+    size_t ret;
+
+    ret = recvfrom(c->s, (void *)c->buffer, c->buf_len, 0,
+        (struct sockaddr *)&c->servAddr, &c->bindAddrSize);
+
+    if(ret == -1)
+        DPRINT(DPRINT_DEBUG, "[%s] recvfrom() failed!\n", __FUNCTION__);
+    else
+#if defined (__amd64__)
+        DPRINT(DPRINT_DEBUG, "[%s] recevied [%ld] bytes\n",
+            __FUNCTION__, ret);
+#elif defined (__i386__)
+        DPRINT(DPRINT_DEBUG, "[%s] recevied [%d] bytes\n",
+            __FUNCTION__, ret);
+#endif
+}
+
+
+void recv_tcp(connection *c)
+{
+    size_t ret;
+
+    ret = recv(c->s, (void *)c->buffer, c->buf_len, 0);
+
+    if(ret == -1)
+        DPRINT(DPRINT_DEBUG, "[%s] recv() failed!\n", __FUNCTION__);
+    else
+#if defined (__amd64__)
+        DPRINT(DPRINT_DEBUG, "[%s] recevied [%ld] bytes\n",
+            __FUNCTION__, ret);
+#elif defined (__i386__)
+        DPRINT(DPRINT_DEBUG, "[%s] recevied [%d] bytes\n",
+            __FUNCTION__, ret);
+#endif
+}
+
+
+void send_udp(connection *c)
+{
+    size_t ret;
+
+    gettimeofday(&c->current, NULL);
+    if(c->current.tv_sec > c->prev.tv_sec ||
+        (c->current.tv_usec - c->prev.tv_usec) > c->delay) {
+            memcpy(&c->prev, &c->current, sizeof(struct timeval));
+            
+            ret = sendto(c->s, c->buffer, c->buf_len, 0, 
+                      (struct sockaddr *)&c->servAddr, c->bindAddrSize);
+
+            if(ret == -1)
+                DPRINT(DPRINT_DEBUG, "[%s] sendto() failed!\n", __FUNCTION__);
+            else
+#if defined (__amd64__)
+                DPRINT(DPRINT_DEBUG, "[%s] sent [%ld] bytes\n",
+                    __FUNCTION__, ret);
+#elif defined (__i386__)
+                DPRINT(DPRINT_DEBUG, "[%s] sent [%d] bytes\n",
+                    __FUNCTION__, ret);
+#endif
+    }
+}
+
+
+void send_tcp(connection *c)
+{
+    size_t ret;
+
+    gettimeofday(&c->current, NULL);
+    if(c->current.tv_sec > c->prev.tv_sec ||
+        (c->current.tv_usec - c->prev.tv_usec) > c->delay) {
+            memcpy(&c->prev, &c->current, sizeof(struct timeval));
+
+            ret = send(c->s, c->buffer, c->buf_len, 0);
+
+            if(ret == -1)
+                DPRINT(DPRINT_DEBUG, "[%s] send() failed!\n", __FUNCTION__);
+            else
+#if defined (__amd64__)
+                DPRINT(DPRINT_DEBUG, "[%s] sent [%ld] bytes\n",
+                    __FUNCTION__, ret);
+#elif defined (__i386__)
+                DPRINT(DPRINT_DEBUG, "[%s] sent [%d] bytes\n",
+                    __FUNCTION__, ret);
+#endif
+    }
+}
+
+
+void cb_rw(int fd, short event, void *args)
+{
+    connection *c = (connection *)args;
+
+    if(event == EV_READ) {
+        if(c->transport == SOCK_STREAM)
+            recv_tcp(c);
+        else
+            recv_udp(c);
+    }
+   
+    if(event == EV_WRITE) {
+        if(c->transport == SOCK_STREAM)
+            send_tcp(c);
+        else
+            send_udp(c);
+    }
+}
+
+
+int prep_connection(connection *c)
+{
+    c->s = socket(c->ipver, c->transport, 0);
+    if(c->s < 0) {
+         DPRINT(DPRINT_ERROR, "[%s] socket() failed!\n", __FUNCTION__);
+         return (-1);
+    }
+
+    if(bind(c->s, (struct sockaddr*)&c->bindAddr, c->bindAddrSize) < 0) {
+        DPRINT(DPRINT_ERROR, "[%s] bind() failed!\n", __FUNCTION__);
+        close(c->s);
+        return (-1);
+    }
+
+    if(connect(c->s, (struct sockaddr *)&c->servAddr, c->bindAddrSize) < 0) {
+        DPRINT(DPRINT_ERROR, "[%s] connect() failed!\n", __FUNCTION__);
+        close(c->s);
+        return (-1);
+    }
+
+    gettimeofday(&c->prev, NULL);
+
+    return (0);
+}
+
+
+#if 0
 void *cb_run_client(void *arg)
 {
     connection *cd_p = (connection *)arg;
@@ -410,6 +568,7 @@ void *cb_run_client(void *arg)
 
     return (NULL);
 }
+#endif
 
 
 void cb_keyboard_int(int fd, short event, void *arg)
@@ -451,7 +610,7 @@ int main(int argc, char **argv)
 
     struct sockaddr_in sin;
     struct sockaddr_in6 sin6;
-    struct event_base *ebase_halt = NULL;
+    struct event_base *e_base = NULL;
     struct event e_ki;
 
     event_timeout e_timeout;
@@ -459,7 +618,7 @@ int main(int argc, char **argv)
     Client cl;
     connection *cons_p;
 
-    traffic_gw tg;
+    /*traffic_gw tg;*/
 
     while((opt = getopt(argc, argv, "4:6:p:t:S:d:T:i:hb")) != -1)
     {
@@ -535,7 +694,7 @@ int main(int argc, char **argv)
     memset(&c, 0, sizeof(connection));
     c.buffer = NULL;
     c.buf_len = buf_len;
-    c.cur_buf_len = buf_len;
+    /*c.cur_buf_len = buf_len;*/
     c.delay = delay;
     c.ipver = ipver;
     c.transport = transport;
@@ -590,8 +749,8 @@ int main(int argc, char **argv)
     if (background)
         daemon(0,0);
 
-    ebase_halt = event_base_new();
-    if(ebase_halt == NULL) {
+    e_base = event_base_new();
+    if(e_base == NULL) {
         DPRINT(DPRINT_ERROR, "[%s] unable to initialize event base\n", 
             __FUNCTION__);
         return (1);
@@ -600,86 +759,84 @@ int main(int argc, char **argv)
     if(!background) {
     /* initialize keyboard interupt event handler */
         event_set(&e_ki, STDIN_FILENO, (EV_READ | EV_PERSIST), 
-            cb_keyboard_int, ebase_halt);
-        event_base_set(ebase_halt, &e_ki);
+            cb_keyboard_int, e_base);
+        event_base_set(e_base, &e_ki);
         event_add(&e_ki, NULL);
     }
 
     /* initialize timeout event handler */
     e_timeout.tv.tv_usec = 0;
     e_timeout.tv.tv_sec = tm_out;
-    event_set(&e_timeout.e, -1, 0, cb_timeout, ebase_halt);
-    event_base_set(ebase_halt, &e_timeout.e);
+    event_set(&e_timeout.e, -1, 0, cb_timeout, e_base);
+    event_base_set(e_base, &e_timeout.e);
     event_add(&e_timeout.e, &e_timeout.tv);
 
     bzero(&cl, sizeof(Client));
 
+#if 0
     if(pthread_mutex_init(&cl.lock, NULL) != 0) {
         DPRINT(DPRINT_ERROR, "[%s] failed to initialize lock\n",
             __FUNCTION__);
         return (1);
     }
+#endif
 
     cl.cons = (connection *) calloc(icount, sizeof(connection));
     cons_p = cl.cons;
 
+#if 0
     bzero(&tg, sizeof(traffic_gw));
     tg.ticket = NULL;
     if(pthread_mutex_init(&tg.lock, NULL)) {
         DPRINT(DPRINT_ERROR, "[%s] unable to initialize lock\n", __FUNCTION__);
         return (1);
     }
+#endif
 
     for(i = 0; i < icount; ++i) {
         memcpy(&cons_p[i], &c, sizeof(connection));
 
-        if(pthread_mutex_init(&cons_p[i].lock, NULL)) {
-            DPRINT(DPRINT_ERROR, "[%s] unable to initialize lock\n",
-                __FUNCTION__);
-            continue;
-        }
-
-        cons_p[i].tg_p = &tg;
-        cons_p[i].idx = i;
-        cons_p[i].client = &cl;
-        DPRINT(DPRINT_DEBUG, "[%s] setting up connection #%d\n", __FUNCTION__, 
-            cons_p[i].idx);
-        if(pthread_create(&cons_p[i].tid, NULL, cb_run_client, 
-               &cons_p[i]) != 0) {
-            DPRINT(DPRINT_ERROR, "[%s] [%d] failed to run\n", __FUNCTION__, i);
+        if(prep_connection(&cons_p[i]) < 0) {
+            DPRINT(DPRINT_ERROR, "[%s] [%d] connection failed \n",
+                __FUNCTION__, i);
         }
         else {
-             ++cl.running;
-        }
+            ++cl.estcount;
+            cons_p[i].established = 1;
+            cons_p[i].buffer = (char *) malloc(cons_p[i].buf_len);
 
-        while(!cl_is_val_set(cons_p[i].established, 1, &cons_p[i].lock) &&
-            cl_is_val_set(cons_p[i].con_err, 0, &cons_p[i].lock)) {
-                cl_sleep_random();
+            event_set(&cons_p[i].r_event, cons_p[i].s,
+                (EV_READ | EV_PERSIST), cb_rw, &cons_p[i]);
+            event_base_set(e_base, &cons_p[i].r_event);
+            event_add(&cons_p[i].r_event, NULL);
+
+            event_set(&cons_p[i].w_event, cons_p[i].s,
+                (EV_WRITE | EV_PERSIST), cb_rw, &cons_p[i]);
+            event_base_set(e_base, &cons_p[i].w_event);
+            event_add(&cons_p[i].w_event, NULL);
         }
     }
 
-    DPRINT(DPRINT_DEBUG, "[%s] %d client threads running\n", __FUNCTION__,
-        cl.running);
-    DPRINT(DPRINT_DEBUG, "[%s] %d connections established (initial count)\n",
-        __FUNCTION__, cl.estcount);
+    DPRINT(DPRINT_DEBUG, "[%s] %d connections established\n", __FUNCTION__,
+        cl.estcount);
 
-    if(pthread_create(&tg.tid, NULL, run_traffic_gateway, &tg) != 0)
-        DPRINT(DPRINT_ERROR, "[%s] unable to create thread\n", __FUNCTION__);
-    else /* this returns either on a timeout event or a keyboard event */
-       event_base_dispatch(ebase_halt);
-
-    DPRINT(DPRINT_DEBUG, "[%s] %d connections established (final count)\n",
-        __FUNCTION__, cl.estcount);
+    event_base_dispatch(e_base);
 
     DPRINT(DPRINT_DEBUG, "[%s] cleaning up...\n", __FUNCTION__);
 
+#if 0
     if(!cl_is_val_set(tg.is_open, 1, &tg.lock)) {
         while(cl_set_val(&tg.stop, 1, &tg.lock) != 1)
             cl_sleep_random();
     }
+#endif
 
     /* clean up */
+    event_del(&e_timeout.e);
+    event_del(&e_ki);
+
     for(i = 0; i < icount; ++i) {
+#if 0
         if(!cl_is_val_set(cons_p[i].established, 1, &cons_p[i].lock)) {
             pthread_mutex_destroy(&cons_p[i].lock);
         }
@@ -699,8 +856,16 @@ int main(int argc, char **argv)
             DPRINT(DPRINT_DEBUG, "[%s] connection #%d closed\n",
                 __FUNCTION__, cons_p[i].idx);
         }
+#endif
+        if(cons_p[i].established) {
+            event_del(&cons_p[i].r_event);
+            event_del(&cons_p[i].w_event);
+            close(cons_p[i].s);
+            free(cons_p[i].buffer);
+        }
     }
 
+    event_base_free(e_base);
     free(cons_p);
     return (0);
 }

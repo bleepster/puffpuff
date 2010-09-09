@@ -37,6 +37,9 @@
 #define BUFFER_SIZE 256
 #define INTERVAL 1
 
+#define SRV_R_EVENT 0
+#define SRV_W_EVENT 1
+
 struct _event_group;
 
 struct echo_node {
@@ -46,6 +49,7 @@ struct echo_node {
 
 typedef struct _echo_queue {
     int active;
+    void *owner;
     u_int32_t count;
     pthread_mutex_t lock;
     TAILQ_HEAD(echo_queue_h, echo_node) head;
@@ -59,6 +63,7 @@ typedef struct _event_data_wrap {
     void *params;
     struct timeval *tv;
     struct event event;
+    struct _event_data_wrap **group_bp;
     struct _event_group *group;
     void (*callback)(int, short, void *arg);
     struct sockaddr_storage peer_s;
@@ -202,13 +207,10 @@ int update_stats(stats *stats_p, unsigned long val)
 
 int setup_event(event_data_wrap *e_wrap)
 {
-    /* TODO: add error checking in case something goes wrong... */
     event_set(&e_wrap->event, e_wrap->fd, e_wrap->eflags, e_wrap->callback, 
         e_wrap->params);
     event_base_set(e_wrap->group->b, &e_wrap->event);
-    event_add(&e_wrap->event, e_wrap->tv);
-
-    return (0);
+    return(event_add(&e_wrap->event, e_wrap->tv));
 }
 
 
@@ -216,6 +218,7 @@ int add_to_group(event_data_wrap *e_wrap)
 {
     if(e_wrap->group != NULL && e_wrap->group->cur < e_wrap->group->max) {
         e_wrap->group->events[e_wrap->group->cur] = e_wrap;
+        e_wrap->group_bp = &e_wrap->group->events[e_wrap->group->cur];
         ++e_wrap->group->cur;
     }
     else {
@@ -230,7 +233,9 @@ int destroy_event(event_data_wrap *e_wrap)
 {
     struct echo_node *en_p = NULL;
 
-    if(e_wrap->eq != NULL) {
+    event_del(&e_wrap->event);
+
+    if(e_wrap->eq != NULL && e_wrap->eq->owner == e_wrap) {
         while(pthread_mutex_trylock(&e_wrap->eq->lock) != 0) 
             srv_sleep_random();
 
@@ -246,7 +251,6 @@ int destroy_event(event_data_wrap *e_wrap)
          free(e_wrap->eq);
     }
 
-    event_del(&e_wrap->event);
     --e_wrap->group->cur;
 
     if(e_wrap->tv != NULL) {
@@ -300,12 +304,28 @@ int destroy_event_group(event_group **grp)
     
     max = (*grp)->cur;
     for(i = 0; i < max; ++i) {
-        destroy_event((*grp)->events[i]);
+        if((*grp)->events[i] != NULL)
+            destroy_event((*grp)->events[i]);
     }
 
     event_base_free((*grp)->b);
     free(*grp);
 
+    return (0);
+}
+
+
+int config_event(event_data_wrap *e)
+{
+    if(add_to_group(e) < 0) {
+        DPRINT(DPRINT_ERROR, "[%s] unable to add event\n", __FUNCTION__);
+        return (-1);
+    }
+    else if(setup_event(e) < 0) {
+        DPRINT(DPRINT_ERROR, "[%s] unable to setup event\n", __FUNCTION__);
+        (*e->group_bp) = NULL;
+        return (-1);
+    }
 
     return (0);
 }
@@ -313,22 +333,32 @@ int destroy_event_group(event_group **grp)
 
 void r_data_tcp(int fd, void *arg)
 {
-    int recv_sz = 0;
+    size_t recv_sz = 0;
     char *recv_buff = NULL;
     event_data_wrap *e_wrap = (event_data_wrap *)arg;
     struct echo_node *en_p = NULL;
-    
+
     recv_buff = (char *) malloc(e_wrap->buf_sz);
     /* if malloc fails, WE.ARE.SCREWED */
 
     memset(recv_buff, '\0', sizeof(recv_buff));
     recv_sz = recv(fd, (void *)recv_buff, e_wrap->buf_sz, 0); 
     if(recv_sz > 0) {
+#if defined (__amd64__)
+        DPRINT(DPRINT_DEBUG, "[%s] received %ld bytes\n", 
+            __FUNCTION__, recv_sz);
+#elif defined (__i386__)
+        DPRINT(DPRINT_DEBUG, "[%s] received %d bytes\n", 
+            __FUNCTION__, recv_sz);
+#endif
+
         update_stats(&e_wrap->group->stats, recv_sz);
   
-        en_p = (struct echo_node *) malloc(sizeof(struct echo_node));
-        if(en_p != NULL &&
+        if(e_wrap->eq != NULL &&
             srv_is_val_set(e_wrap->eq->active, 1, &e_wrap->eq->lock)) {
+
+            en_p = (struct echo_node *) malloc(sizeof(struct echo_node));
+
             while(pthread_mutex_trylock(&e_wrap->eq->lock) != 0) 
                 srv_sleep_random();
 
@@ -352,6 +382,7 @@ void r_data_tcp(int fd, void *arg)
 void w_data_tcp(int fd, void *arg)
 {
     size_t send_sz = 0;
+    size_t sent = 0;
     char *send_buff = NULL;
     event_data_wrap *e_wrap = (event_data_wrap *)arg;
     struct echo_node *en_p = NULL;
@@ -369,12 +400,22 @@ void w_data_tcp(int fd, void *arg)
 
         pthread_mutex_unlock(&e_wrap->eq->lock);
 
-        send_buff = (char *) malloc(send_sz);
-        /* if malloc fails, WE.ARE.SCREWED */
+        if(send_sz > 0)
+        {
+            send_buff = (char *) malloc(send_sz);
+            /* if malloc fails, WE.ARE.SCREWED */
 
-        if(send_buff != NULL) {
-           send(fd, send_buff, send_sz, 0);
-           free(send_buff);
+            if(send_buff != NULL) {
+               sent = send(fd, send_buff, send_sz, 0);
+#if defined (__amd64__)
+               DPRINT(DPRINT_DEBUG, "[%s] sent %ld bytes\n", __FUNCTION__,
+                   sent);
+#elif defined (__i386__)
+               DPRINT(DPRINT_DEBUG, "[%s] sent %d bytes\n", __FUNCTION__,
+                   sent);
+#endif
+               free(send_buff);
+            }
         }
     }
 }
@@ -468,7 +509,8 @@ void accept_conn(int fd, short event, void *arg)
 {
     int new_conn;
     socklen_t sz;
-    event_data_wrap *rw_event = NULL;
+    event_data_wrap *r_event = NULL;
+    event_data_wrap *w_event = NULL;
     run_data *rd = (run_data *)arg;
     struct sockaddr_storage peer;
     
@@ -476,53 +518,70 @@ void accept_conn(int fd, short event, void *arg)
     memset(&peer, 0, sizeof(struct sockaddr_storage));
     new_conn = accept(fd, (struct sockaddr *)&peer, &sz);
     if(new_conn > 0) {
-        rw_event = (event_data_wrap *) calloc(1, sizeof(event_data_wrap));
+        DPRINT(DPRINT_DEBUG, "[%s] connection accepted, socket [%d]\n",
+            __FUNCTION__, new_conn);
 
-        if(rw_event == NULL) {
-            DPRINT(DPRINT_ERROR, "[%s] malloc() failed\n", __FUNCTION__);
+        r_event = (event_data_wrap *) malloc(sizeof(event_data_wrap));
+
+        r_event->fd = new_conn;
+        r_event->eflags = (EV_READ | EV_PERSIST);
+        r_event->group = rd->e_group;
+        r_event->callback = rw_data_tcp;
+        r_event->tv = NULL;
+        r_event->params = r_event;
+        r_event->buf_sz = rd->p.buf_sz;
+        r_event->eq = NULL;
+        r_event->group_bp = NULL;
+        memcpy(&r_event->peer_s, &peer, 
+            sizeof(struct sockaddr_storage));
+
+        if(config_event(r_event) < 0) {
+            DPRINT(DPRINT_ERROR, "[%s] unable to configure event\n",
+                __FUNCTION__);
+            free(r_event);
+            r_event = NULL;
         }
-        else {
 
-            rw_event->fd = new_conn;
-            rw_event->group = rd->e_group;
-            rw_event->callback = rw_data_tcp;
-            rw_event->tv = NULL;
-            rw_event->params = rw_event;
-            rw_event->buf_sz = rd->p.buf_sz;
-            memcpy(&rw_event->peer_s, &peer, 
-                sizeof(struct sockaddr_storage));
+        if(r_event != NULL && rd->p.do_echo) {
+            w_event = (event_data_wrap *) malloc(sizeof(event_data_wrap));
 
-            if(rd->p.do_echo) {
-                rw_event->eq = (echo_queue *) malloc(sizeof(echo_queue));
+            memcpy(w_event, r_event,
+                sizeof(event_data_wrap));
 
-                rw_event->eflags = (EV_WRITE | EV_READ | EV_PERSIST);
-                if(pthread_mutex_init(&rw_event->eq->lock, NULL) != 0) {
-                    DPRINT(DPRINT_ERROR, "[%s] unable to setup lock\n", 
+            w_event->eflags = (EV_WRITE | EV_PERSIST);
+            w_event->params = w_event;
+
+            w_event->eq = (echo_queue *) malloc(sizeof(echo_queue));
+            memset(w_event->eq, 0, sizeof(echo_queue));
+            pthread_mutex_init(&w_event->eq->lock, NULL);
+            TAILQ_INIT(&w_event->eq->head);
+
+            r_event->eq = w_event->eq;
+            /* XXX this is evil... */
+            w_event->eq->owner = (void *)w_event->eq;
+
+            if(config_event(w_event) < 0) {
+                DPRINT(DPRINT_ERROR, "[%s] unable to configure event\n",
                     __FUNCTION__);
-                    close(new_conn);
-                    free(rw_event);
-                }
-                TAILQ_INIT(&rw_event->eq->head);
+                free(w_event);
+                w_event = NULL;
+
+                *r_event->group_bp = NULL;
+                destroy_event(r_event);
+                free(r_event);
+                r_event = NULL;
             }
             else {
-                rw_event->eflags = (EV_READ | EV_PERSIST);
-            }
-
-            if(setup_event(rw_event) < 0 || add_to_group(rw_event) < 0) {
-                    DPRINT(DPRINT_ERROR, "[%s] unable to setup event\n", 
-                    __FUNCTION__);
-
-                close(new_conn);
-                free(rw_event);
-            }
-            else {
-                DPRINT(DPRINT_DEBUG, "[%s] connection accepted, socket [%d]\n",
-                    __FUNCTION__, new_conn);
-
-                while(srv_set_val(&rw_event->eq->active, 1,
-                    &rw_event->eq->lock) != 1)
+                while(srv_set_val(&w_event->eq->active, 1,
+                    &w_event->eq->lock) != 1)
                         srv_sleep_random();
             }
+        }
+
+       if(r_event == NULL && w_event == NULL) {
+           close(new_conn);
+           DPRINT(DPRINT_DEBUG, "[%s] closing [%d], unable to setup event\n",
+               __FUNCTION__, new_conn);
        }
     }
 }
@@ -532,9 +591,10 @@ int loop_tcp(run_data *rd)
 {
     /* note: all event_data_wrap allocated inside this function will be      */
     /*       free()'d by run() during destroy_event_group(). in an event     */
-    /*       where a call to setup_event() or add_to_group() fails, free()   */
-    /*       is called immediately since destroy_event_group() are not aware */
-    /*       of them and won't be able to free() them                        */
+    /*       where a call to config_event() fails, free() should be called   */
+    /*       immediately since destroy_event_group() is not aware of those   */
+
+    /*       failed events                                                   */
 
     event_data_wrap *output_event = NULL;
     event_data_wrap *accept_event = NULL;
@@ -555,15 +615,10 @@ int loop_tcp(run_data *rd)
     accept_event->callback = accept_conn;
     accept_event->tv = NULL;
     accept_event->params = rd;
+    accept_event->group_bp = NULL;
 
-    if(setup_event(accept_event) < 0 || add_to_group(accept_event) < 0) {
-        DPRINT(DPRINT_ERROR, "[%s] unable to setup event\n", __FUNCTION__);
-        free(accept_event);
-        return (1);
-    }
-
-    if(setup_event(accept_event) < 0 || add_to_group(accept_event) < 0) {
-        DPRINT(DPRINT_ERROR, "[%s] unable to setup event\n", __FUNCTION__);
+    if(config_event(accept_event) < 0) {
+        DPRINT(DPRINT_ERROR, "[%s] unable to configure event\n", __FUNCTION__);
         free(accept_event);
         return (1);
     }
@@ -581,9 +636,11 @@ int loop_tcp(run_data *rd)
         console_event->callback = cons_read;
         console_event->tv = NULL;
         console_event->params = rd->e_group->b;
+        console_event->group_bp = NULL;
 
-        if(setup_event(console_event) < 0 || add_to_group(console_event) < 0) {
-            DPRINT(DPRINT_ERROR, "[%s] unable to setup event\n", __FUNCTION__);
+        if(config_event(console_event) < 0) {
+            DPRINT(DPRINT_ERROR, "[%s] unable to configure event\n",
+                __FUNCTION__);
             free(console_event);
             return (1);
         }
@@ -599,14 +656,17 @@ int loop_tcp(run_data *rd)
         output_event->group = rd->e_group;
         output_event->callback = output_stats;
 
-        output_event->tv = (struct timeval *) calloc(1, sizeof(struct timeval));
+        output_event->tv =
+            (struct timeval *) calloc(1,sizeof(struct timeval));
         output_event->tv->tv_usec = 0;
         output_event->tv->tv_sec = rd->p.interval;
 
         output_event->params = output_event;
+        output_event->group_bp = NULL;
 
-        if(setup_event(output_event) < 0 || add_to_group(output_event) < 0) {
-            DPRINT(DPRINT_ERROR, "[%s] unable to setup event\n", __FUNCTION__);
+        if(config_event(output_event) < 0) {
+            DPRINT(DPRINT_ERROR, "[%s] unable to configure event\n",
+                __FUNCTION__);
             free(output_event);
             return (1);
         }
@@ -625,13 +685,15 @@ int loop_tcp(run_data *rd)
 
     signal_event->tv = NULL;
     signal_event->params = rd->e_group->b;
+    signal_event->group_bp = NULL;
 
-    if(setup_event(signal_event) < 0 || add_to_group(signal_event) < 0) {
-        DPRINT(DPRINT_ERROR, "[%s] unable to setup event\n", __FUNCTION__);
-        free(signal_event);
+    if(config_event(signal_event) < 0) {
+        DPRINT(DPRINT_ERROR, "[%s] unable to configure event\n", __FUNCTION__);
+        free(output_event);
         return (1);
     }
 
+    /* is 5 enough? */
     if(listen(rd->s, 5) < 0) {
         DPRINT(DPRINT_ERROR, "[%s] listen() failed\n", __FUNCTION__);
         return (1);
@@ -673,9 +735,10 @@ int loop_udp(run_data *rd)
     read_event->tv = NULL;
     read_event->buf_sz = rd->p.buf_sz;
     read_event->params = read_event;
+    read_event->group_bp = NULL;
 
-    if(setup_event(read_event) < 0 || add_to_group(read_event) < 0) {
-        DPRINT(DPRINT_ERROR, "[%s] unable to setup event\n", __FUNCTION__);
+    if(config_event(read_event) < 0) {
+        DPRINT(DPRINT_ERROR, "[%s] unable to configure event\n", __FUNCTION__);
         free(read_event);
         return (1);
     }
@@ -694,9 +757,11 @@ int loop_udp(run_data *rd)
         console_event->callback = cons_read;
         console_event->tv = NULL;
         console_event->params = rd->e_group->b;
+        console_event->group_bp = NULL;
 
-        if(setup_event(console_event) < 0 || add_to_group(console_event) < 0) {
-            DPRINT(DPRINT_ERROR, "[%s] unable to setup event\n", __FUNCTION__);
+        if(config_event(console_event) < 0) {
+            DPRINT(DPRINT_ERROR, "[%s] unable to configure event\n",
+                __FUNCTION__);
             free(console_event);
             return (1);
         }
@@ -718,9 +783,11 @@ int loop_udp(run_data *rd)
         output_event->tv->tv_sec = rd->p.interval;
 
         output_event->params = output_event;
+        output_event->group_bp = NULL;
 
-        if(setup_event(output_event) < 0 || add_to_group(output_event) < 0) {
-            DPRINT(DPRINT_ERROR, "[%s] unable to setup event\n", __FUNCTION__);
+        if(config_event(output_event) < 0) {
+            DPRINT(DPRINT_ERROR, "[%s] unable to configure event\n",
+                __FUNCTION__);
             free(output_event);
             return (1);
         }
@@ -739,9 +806,10 @@ int loop_udp(run_data *rd)
 
     signal_event->tv = NULL;
     signal_event->params = rd->e_group->b;
+    signal_event->group_bp = NULL;
 
-    if(setup_event(signal_event) < 0 || add_to_group(signal_event) < 0) {
-        DPRINT(DPRINT_ERROR, "[%s] unable to setup event\n", __FUNCTION__);
+    if(config_event(signal_event) < 0) {
+        DPRINT(DPRINT_ERROR, "[%s] unable to configure event\n", __FUNCTION__);
         free(signal_event);
         return (1);
     }
@@ -945,8 +1013,12 @@ int main(int argc, char *argv[])
 
     /* always add three for the default three events that we expect other */
     /* than socket receive events: listen socket events, console events,  */
-    /* stats timer output events                                          */
-    p.max_cons += 3;
+    /* stats timer output events. if echo is enable, then max_cons should */
+    /* be doubled: one for read and one for write on each connection      */
+    if(p.do_echo)
+        p.max_cons = (p.max_cons * 2) + 3;
+    else
+        p.max_cons += 3;
 
     memset(&rd, 0, sizeof(run_data));
     memcpy(&rd.p, &p, sizeof(params));
