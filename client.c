@@ -264,10 +264,11 @@ int prep_connection(connection *c)
         return (-1);
     }
 
-    if(connect(c->s, (struct sockaddr *)&c->servAddr, c->bindAddrSize) < 0) {
-        DPRINT(DPRINT_ERROR, "[%s] connect() failed!\n", __FUNCTION__);
-        close(c->s);
-        return (-1);
+    if(c->transport == SOCK_STREAM && connect(c->s,
+          (struct sockaddr *)&c->servAddr, c->bindAddrSize) < 0) {
+              DPRINT(DPRINT_ERROR, "[%s] connect() failed!\n", __FUNCTION__);
+              close(c->s);
+              return (-1);
     }
 
     gettimeofday(&c->prev, NULL);
