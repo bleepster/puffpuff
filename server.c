@@ -51,6 +51,7 @@ typedef struct _echo_queue {
     int active;
     void *owner;
     u_int32_t count;
+    struct sockaddr_storage peer_s; /* used for udp */
     pthread_mutex_t lock;
     TAILQ_HEAD(echo_queue_h, echo_node) head;
 } echo_queue;
@@ -490,7 +491,8 @@ void w_data_udp(int fd, short event, void *arg)
 
             if(send_buff != NULL) {
                sent = sendto(fd, send_buff, send_sz, 0,
-                          (struct sockaddr *)&e_wrap->peer_s, e_wrap->peer_sz);
+                          (struct sockaddr *)&e_wrap->eq->peer_s,
+                          e_wrap->peer_sz);
 #if defined (__amd64__)
                DPRINT(DPRINT_DEBUG, "[%s] sent %ld bytes\n", __FUNCTION__,
                    sent);
@@ -537,6 +539,7 @@ void r_data_udp(int fd, short event, void *arg)
             while(pthread_mutex_trylock(&e_wrap->eq->lock) != 0) 
                 srv_sleep_random();
 
+            memcpy(&e_wrap->eq->peer_s, &e_wrap->peer_s, e_wrap->peer_sz);
             en_p->echo_send_sz = recv_sz;
             TAILQ_INSERT_TAIL(&e_wrap->eq->head, en_p, entries);
 
@@ -841,7 +844,12 @@ int loop_udp(run_data *rd)
             free(read_event);
             return (1);
         }
+
+        while(srv_set_val(&send_event->eq->active, 1,
+            &send_event->eq->lock) != 1)
+                srv_sleep_random();
     }
+
 
     /* we only enable the following events if we're not running as a daemon */
     if(!rd->p.is_daemon) {
