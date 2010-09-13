@@ -67,6 +67,7 @@ typedef struct _event_data_wrap {
     struct _event_group *group;
     void (*callback)(int, short, void *arg);
     struct sockaddr_storage peer_s;
+    size_t peer_sz; /* used for udp */
     echo_queue *eq;
 } event_data_wrap; 
 
@@ -461,22 +462,86 @@ void output_stats(int fd, short event, void *arg)
 }
 
 
-void recv_data_udp(int fd, short event, void *arg)
+void w_data_udp(int fd, short event, void *arg)
 {
-    int recv_sz = 0;
-    socklen_t sz;
+    size_t send_sz = 0;
+    size_t sent = 0;
+    char *send_buff = NULL;
+    event_data_wrap *e_wrap = (event_data_wrap *)arg;
+    struct echo_node *en_p = NULL;
+    
+    if(srv_is_val_set(e_wrap->eq->active, 1, &e_wrap->eq->lock)) {
+        while(pthread_mutex_trylock(&e_wrap->eq->lock) != 0) 
+            srv_sleep_random();
+
+        if(!TAILQ_EMPTY(&e_wrap->eq->head)) {
+            en_p = TAILQ_FIRST(&e_wrap->eq->head);
+            send_sz = en_p->echo_send_sz;
+            TAILQ_REMOVE(&e_wrap->eq->head, en_p, entries);
+            free(en_p);
+        } 
+
+        pthread_mutex_unlock(&e_wrap->eq->lock);
+
+        if(send_sz > 0)
+        {
+            send_buff = (char *) malloc(send_sz);
+            /* if malloc fails, WE.ARE.SCREWED */
+
+            if(send_buff != NULL) {
+               sent = sendto(fd, send_buff, send_sz, 0,
+                          (struct sockaddr *)&e_wrap->peer_s, e_wrap->peer_sz);
+#if defined (__amd64__)
+               DPRINT(DPRINT_DEBUG, "[%s] sent %ld bytes\n", __FUNCTION__,
+                   sent);
+#elif defined (__i386__)
+               DPRINT(DPRINT_DEBUG, "[%s] sent %d bytes\n", __FUNCTION__,
+                   sent);
+#endif
+               free(send_buff);
+            }
+        }
+    }
+}
+
+
+void r_data_udp(int fd, short event, void *arg)
+{
+    size_t recv_sz = 0;
     char *recv_buff = NULL;
     event_data_wrap *e_wrap = (event_data_wrap *)arg;
+    struct echo_node *en_p = NULL;
 
     recv_buff = (char *) malloc(e_wrap->buf_sz);
     /* if malloc fails, WE.ARE.SCREWED */
     
     memset(recv_buff, '\0', sizeof(recv_buff));
-    sz = sizeof(struct sockaddr);
     recv_sz = recvfrom(fd, (void *)recv_buff, e_wrap->buf_sz, 0,
-        (struct sockaddr *)&e_wrap->peer_s, &sz); 
+        (struct sockaddr *)&e_wrap->peer_s, (socklen_t *)&e_wrap->peer_sz); 
     if(recv_sz > 0) {
+#if defined (__amd64__)
+        DPRINT(DPRINT_DEBUG, "[%s] received %ld bytes\n", 
+            __FUNCTION__, recv_sz);
+#elif defined (__i386__)
+        DPRINT(DPRINT_DEBUG, "[%s] received %d bytes\n", 
+            __FUNCTION__, recv_sz);
+#endif
+
         update_stats(&e_wrap->group->stats, recv_sz);
+  
+        if(e_wrap->eq != NULL &&
+            srv_is_val_set(e_wrap->eq->active, 1, &e_wrap->eq->lock)) {
+
+            en_p = (struct echo_node *) malloc(sizeof(struct echo_node));
+
+            while(pthread_mutex_trylock(&e_wrap->eq->lock) != 0) 
+                srv_sleep_random();
+
+            en_p->echo_send_sz = recv_sz;
+            TAILQ_INSERT_TAIL(&e_wrap->eq->head, en_p, entries);
+
+            pthread_mutex_unlock(&e_wrap->eq->lock);
+        }
     }
 
     free(recv_buff);
@@ -593,7 +658,6 @@ int loop_tcp(run_data *rd)
     /*       free()'d by run() during destroy_event_group(). in an event     */
     /*       where a call to config_event() fails, free() should be called   */
     /*       immediately since destroy_event_group() is not aware of those   */
-
     /*       failed events                                                   */
 
     event_data_wrap *output_event = NULL;
@@ -711,11 +775,12 @@ int loop_udp(run_data *rd)
 {
     /* note: all event_data_wrap allocated inside this function will be      */
     /*       free()'d by run() during destroy_event_group(). in an event     */
-    /*       where a call to setup_event() or add_to_group() fails, free()   */
-    /*       is called immediately since destroy_event_group() are not aware */
-    /*       of them and won't be able to free() them                        */
+    /*       where a call to config_event() fails, free() should be called   */
+    /*       immediately since destroy_event_group() is not aware of those   */
+    /*       failed events                                                   */
 
     event_data_wrap *read_event = NULL;
+    event_data_wrap *send_event = NULL;
     event_data_wrap *console_event = NULL;
     event_data_wrap *output_event = NULL;
     event_data_wrap *signal_event = NULL;
@@ -731,16 +796,55 @@ int loop_udp(run_data *rd)
     read_event->fd = rd->s;
     read_event->eflags = (EV_READ | EV_PERSIST);
     read_event->group = rd->e_group;
-    read_event->callback = recv_data_udp;
+    read_event->callback = r_data_udp;
     read_event->tv = NULL;
     read_event->buf_sz = rd->p.buf_sz;
     read_event->params = read_event;
     read_event->group_bp = NULL;
+    read_event->peer_sz = rd->saddr_sz;
 
     if(config_event(read_event) < 0) {
         DPRINT(DPRINT_ERROR, "[%s] unable to configure event\n", __FUNCTION__);
         free(read_event);
         return (1);
+    }
+
+    if(rd->p.do_echo) {
+        send_event = (event_data_wrap *) calloc(1, sizeof(event_data_wrap));
+        if(send_event == NULL) {
+            DPRINT(DPRINT_ERROR, "[%s] malloc() failed\n", __FUNCTION__);
+            return (1);
+        }
+
+        send_event->eq = (echo_queue *) malloc(sizeof(echo_queue));
+        memset(send_event->eq, 0, sizeof(echo_queue));
+        pthread_mutex_init(&send_event->eq->lock, NULL);
+        TAILQ_INIT(&send_event->eq->head);
+
+        read_event->eq = send_event->eq;
+        /* XXX this is evil... */
+        send_event->eq->owner = (void *)send_event->eq;
+
+        send_event->fd = rd->s;
+        send_event->eflags = (EV_WRITE | EV_PERSIST);
+        send_event->group = rd->e_group;
+        send_event->callback = w_data_udp;
+        send_event->tv = NULL;
+        send_event->buf_sz = rd->p.buf_sz;
+        send_event->params = send_event;
+        send_event->group_bp = NULL;
+        send_event->peer_sz = rd->saddr_sz;
+
+        if(config_event(send_event) < 0) {
+            DPRINT(DPRINT_ERROR, "[%s] unable to configure event\n",
+                __FUNCTION__);
+            free(send_event);
+
+            *read_event->group_bp = NULL;
+            destroy_event(read_event);
+            free(read_event);
+            return (1);
+        }
     }
 
     /* we only enable the following events if we're not running as a daemon */
