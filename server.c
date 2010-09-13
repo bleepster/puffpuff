@@ -816,6 +816,12 @@ int loop_udp(run_data *rd)
             return (1);
         }
 
+        memcpy(send_event, read_event, sizeof(event_data_wrap));
+
+        send_event->eflags = (EV_WRITE | EV_PERSIST);
+        send_event->callback = w_data_udp;
+        send_event->params = send_event;
+
         send_event->eq = (echo_queue *) malloc(sizeof(echo_queue));
         memset(send_event->eq, 0, sizeof(echo_queue));
         pthread_mutex_init(&send_event->eq->lock, NULL);
@@ -824,16 +830,6 @@ int loop_udp(run_data *rd)
         read_event->eq = send_event->eq;
         /* XXX this is evil... */
         send_event->eq->owner = (void *)send_event->eq;
-
-        send_event->fd = rd->s;
-        send_event->eflags = (EV_WRITE | EV_PERSIST);
-        send_event->group = rd->e_group;
-        send_event->callback = w_data_udp;
-        send_event->tv = NULL;
-        send_event->buf_sz = rd->p.buf_sz;
-        send_event->params = send_event;
-        send_event->group_bp = NULL;
-        send_event->peer_sz = rd->saddr_sz;
 
         if(config_event(send_event) < 0) {
             DPRINT(DPRINT_ERROR, "[%s] unable to configure event\n",
