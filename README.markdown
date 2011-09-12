@@ -12,9 +12,8 @@ Dependencies
 * pthread
 * libevent
 
-Platform
-========
-Known to run in the following OSes
+Known to work on the following
+==============================
 * Ubuntu
 * FreeBSD
 
